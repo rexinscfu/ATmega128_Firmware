@@ -13,6 +13,8 @@ mod application;
 mod config;
 mod os;
 
+use drivers::{LedMatrix, SerialConsole};
+
 // Global state for interrupt handling
 static GLOBAL_PERIPHERALS: Mutex<RefCell<Option<Peripherals>>> = 
     Mutex::new(RefCell::new(None));
@@ -25,14 +27,26 @@ fn main() -> ! {
         GLOBAL_PERIPHERALS.borrow(cs).replace(Some(dp));
     });
 
-    // TODO: Initialize system clock and peripherals
-    // TODO: Setup watchdog timer
-    // TODO: Configure power management
-    
+    // Initialize drivers
+    let mut console = SerialConsole::new();
+    let mut leds = LedMatrix::new();
+
+    // Enable interrupts globally
+    unsafe { avr_device::interrupt::enable() };
+
+    // Print startup message
+    console.write_line("ATmega128 Firmware v0.1.0");
+    console.write_line("Ready...");
+
     #[allow(clippy::empty_loop)]
     loop {
-        // Main event loop will go here
-        // For now, just enter sleep mode
+        // Echo any received characters and toggle LED pattern
+        if let Some(byte) = console.read_byte() {
+            console.write_byte(byte);
+            leds.set_pattern(byte & 0x0F);
+        }
+
+        // Enter sleep mode to save power
         unsafe {
             avr_device::asm::sleep()
         }
