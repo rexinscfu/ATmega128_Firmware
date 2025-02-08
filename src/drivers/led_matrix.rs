@@ -1,6 +1,7 @@
 use crate::hal::gpio::board::{LED0, LED1, LED2, LED3};
 use crate::hal::gpio::Output;
 use crate::hal::gpio::Pin;
+use crate::hal::delay_ms;
 use avr_device::atmega128::PORTA;
 
 pub struct LedMatrix {
@@ -51,21 +52,11 @@ impl LedMatrix {
     pub fn knight_rider(&mut self, delay_ms: u16) {
         for i in 0..self.leds.len() {
             self.set_pattern(1 << i);
-            self.delay_ms(delay_ms);
+            delay_ms(delay_ms);
         }
         for i in (0..self.leds.len()).rev() {
             self.set_pattern(1 << i);
-            self.delay_ms(delay_ms);
-        }
-    }
-
-    // TODO: Replace with proper timer-based delay
-    #[inline(always)]
-    fn delay_ms(&self, ms: u16) {
-        for _ in 0..ms {
-            for _ in 0..1600 { // Approximately 1ms at 16MHz
-                unsafe { core::arch::asm!("nop") }
-            }
+            delay_ms(delay_ms);
         }
     }
 }
