@@ -14,7 +14,7 @@ mod config;
 mod os;
 
 use drivers::{LedMatrix, SerialConsole, ButtonHandler, ButtonEvent, Button};
-use hal::{Power, SleepMode};
+use hal::{Power, SleepMode, Watchdog, WatchdogTimeout};
 
 // Global state for interrupt handling
 static GLOBAL_PERIPHERALS: Mutex<RefCell<Option<Peripherals>>> = 
@@ -33,6 +33,10 @@ fn main() -> ! {
     let mut leds = LedMatrix::new();
     let mut buttons = ButtonHandler::new();
     let mut power = Power::new();
+    let mut watchdog = Watchdog::new();
+
+    // Enable watchdog with 1s timeout
+    watchdog.start(WatchdogTimeout::Ms1000);
 
     // Enable interrupts globally
     unsafe { avr_device::interrupt::enable() };
@@ -46,6 +50,9 @@ fn main() -> ! {
 
     #[allow(clippy::empty_loop)]
     loop {
+        // Feed watchdog to prevent reset
+        watchdog.feed();
+
         // Handle button events
         if let Some(event) = buttons.poll() {
             match event {
@@ -94,7 +101,14 @@ fn main() -> ! {
             // No activity for a while, enter power down
             console.write_line("Entering power down mode...");
             leds.set_all(false);
+            
+            // Disable watchdog before deep sleep
+            watchdog.disable();
             power.enter_power_down();
+            
+            // Re-enable watchdog after wakeup
+            watchdog.start(WatchdogTimeout::Ms1000);
+            
             idle_counter = 0;
             console.write_line("Waking up from power down");
         } else {
