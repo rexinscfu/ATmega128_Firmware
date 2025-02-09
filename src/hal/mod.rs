@@ -1,21 +1,23 @@
-pub mod gpio;
-pub mod uart;
-pub mod timer;
-pub mod power;
-pub mod watchdog;
 pub mod adc;
+pub mod gpio;
+pub mod power;
+pub mod spi;
+pub mod timer;
+pub mod uart;
+pub mod watchdog;
 
 // Re-export commonly used types
-pub use gpio::{Pin, Input, Output};
+pub use adc::{Adc, AdcChannel, AdcPrescaler, AdcReference};
 pub use gpio::board;
-pub use uart::Uart;
-pub use timer::{Timer, Prescaler, delay_ms};
+pub use gpio::{Input, Output, Pin};
 pub use power::{Power, SleepMode};
+pub use spi::{DataOrder, Spi, SpiMode, SpiPrescaler};
+pub use timer::{delay_ms, Prescaler, Timer};
+pub use uart::Uart;
 pub use watchdog::{Watchdog, WatchdogTimeout};
-pub use adc::{Adc, AdcChannel, AdcReference, AdcPrescaler};
 
-// TODO: Add other HAL modules (SPI, TWI, etc)
+// TODO: Add other HAL modules (TWI, etc)
 #[allow(dead_code)]
 pub(crate) struct Hal {
     // Will contain HAL instances
-} 
+}
