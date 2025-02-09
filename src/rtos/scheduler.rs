@@ -1,37 +1,22 @@
 //! Real-time task scheduler implementation
 #![no_std]
 
-use core::cell::Cell;
-use avr_device::atmega128::TC0;
-use crate::hal::timer::Timer;
+use super::task::{Task, TaskState, TaskControl};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use avr_device::atmega128::{TC0, interrupt};
 
 const MAX_TASKS: usize = 16;
 const TICK_MS: u32 = 1;
 
-#[derive(Copy, Clone, PartialEq)]
-pub enum TaskPriority {
-    Low = 0,
-    Normal = 1,
-    High = 2,
-    Critical = 3,
-}
+static SCHEDULER_RUNNING: AtomicBool = AtomicBool::new(false);
+static SYSTEM_TICKS: AtomicU32 = AtomicU32::new(0);
 
-#[derive(Copy, Clone)]
-pub enum TaskState {
-    Ready,
-    Running,
-    Blocked,
-    Suspended,
-}
-
-type TaskFunction = fn() -> TaskState;
-
-pub struct Task {
-    function: TaskFunction,
-    priority: TaskPriority,
-    period_ms: u32,
-    next_run: u32,
-    state: Cell<TaskState>,
+pub struct Scheduler {
+    tasks: [Option<Task>; MAX_TASKS],
+    current_task: Option<usize>,
+    next_task: Option<usize>,
+    timer: TC0,
+    task_count: usize,
 }
 
 /*
@@ -70,9 +55,14 @@ impl Scheduler {
     }
 
     pub fn init(&mut self) {
-        self.timer.init();
-        self.timer.set_callback(Self::tick_handler);
-        self.timer.start(TICK_MS);
+        unsafe {
+            self.timer.tccr0.write(|w| w.bits(0x03));
+            self.timer.ocr0.write(|w| w.bits(250));
+            self.timer.timsk.write(|w| w.bits(0x02));
+            
+            interrupt::enable();
+            SCHEDULER_RUNNING.store(true, Ordering::SeqCst);
+        }
     }
 
     pub fn add_task(&mut self, function: TaskFunction, priority: TaskPriority, period_ms: u32) -> bool {
@@ -112,42 +102,68 @@ impl Scheduler {
     }
 
     pub fn run(&mut self) -> ! {
-        loop {
-            self.dispatch_tasks();
-            self.idle_task();
+        while SCHEDULER_RUNNING.load(Ordering::SeqCst) {
+            if let Some(next) = self.schedule_next_task() {
+                self.switch_task(next);
+            } else {
+                self.idle_task();
+            }
         }
+        loop {}
     }
 
-    fn dispatch_tasks(&mut self) {
-        let current_time = self.current_time;
+    fn schedule_next_task(&mut self) -> Option<usize> {
+        let current_time = SYSTEM_TICKS.load(Ordering::SeqCst);
+        let mut highest_priority = None;
         
-        for priority in [TaskPriority::Critical, TaskPriority::High, TaskPriority::Normal, TaskPriority::Low].iter() {
-            for task_slot in self.tasks.iter() {
-                if let Some(task) = task_slot {
-                    if task.priority == *priority && 
-                       task.state.get() != TaskState::Suspended &&
-                       task.next_run <= current_time {
-                        
-                        task.state.set(TaskState::Running);
-                        let new_state = (task.function)();
-                        task.state.set(new_state);
-                        
-                        if new_state == TaskState::Ready {
-                            let next_run = task.next_run + task.period_ms;
-                            if next_run > current_time {
-                                task.next_run = next_run;
-                            } else {
-                                task.next_run = current_time + task.period_ms;
+        for (idx, task_slot) in self.tasks.iter().enumerate() {
+            if let Some(task) = task_slot {
+                if task.control.state == TaskState::Ready {
+                    match highest_priority {
+                        None => highest_priority = Some(idx),
+                        Some(current_highest) => {
+                            if let Some(current_task) = &self.tasks[current_highest] {
+                                if task.control.priority > current_task.control.priority {
+                                    highest_priority = Some(idx);
+                                }
                             }
                         }
                     }
                 }
             }
         }
+        highest_priority
     }
 
     fn idle_task(&self) {
-        avr_device::asm::sleep_mode();
+        unsafe {
+            avr_device::asm::sei();
+            avr_device::asm::sleep_mode();
+            avr_device::asm::cli();
+        }
+    }
+    
+    fn switch_task(&mut self, next_task: usize) {
+        if let Some(current) = self.current_task {
+            if let Some(task) = &mut self.tasks[current] {
+                unsafe {
+                    let sp: *mut u8;
+                    core::arch::asm!("in {}, 0x3D", out(reg) sp);
+                    task.save_context(sp);
+                }
+                task.control.state = TaskState::Ready;
+            }
+        }
+        
+        if let Some(task) = &mut self.tasks[next_task] {
+            task.control.state = TaskState::Running;
+            unsafe {
+                let sp = task.get_stack_ptr();
+                core::arch::asm!("out 0x3D, {}", in(reg) sp);
+            }
+        }
+        
+        self.current_task = Some(next_task);
     }
 
     extern "avr-interrupt" fn tick_handler() {
