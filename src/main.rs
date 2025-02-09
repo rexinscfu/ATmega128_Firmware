@@ -14,7 +14,7 @@ mod config;
 mod os;
 
 use drivers::{LedMatrix, SerialConsole, ButtonHandler, ButtonEvent, Button};
-use hal::{Power, SleepMode, Watchdog, WatchdogTimeout};
+use hal::{Power, SleepMode, Watchdog, WatchdogTimeout, Adc, AdcChannel};
 
 // Global state for interrupt handling
 static GLOBAL_PERIPHERALS: Mutex<RefCell<Option<Peripherals>>> = 
@@ -34,6 +34,7 @@ fn main() -> ! {
     let mut buttons = ButtonHandler::new();
     let mut power = Power::new();
     let mut watchdog = Watchdog::new();
+    let mut adc = Adc::new();
 
     // Enable watchdog with 1s timeout
     watchdog.start(WatchdogTimeout::Ms1000);
@@ -47,6 +48,7 @@ fn main() -> ! {
 
     let mut led_pattern = 0u8;
     let mut idle_counter = 0u16;
+    let mut adc_counter = 0u16;
 
     #[allow(clippy::empty_loop)]
     loop {
@@ -86,6 +88,18 @@ fn main() -> ! {
                     // Ignore release events for now
                 }
             }
+        }
+
+        // Read ADC every ~500ms
+        adc_counter = adc_counter.saturating_add(1);
+        if adc_counter >= 500 {
+            let voltage = adc.read_voltage(AdcChannel::Adc0);
+            console.write_str("ADC0: ");
+            // Convert float to integer for simple display
+            let mv = (voltage * 1000.0) as u16;
+            console.write_str(mv.to_string().as_str());
+            console.write_line("mV");
+            adc_counter = 0;
         }
 
         // Echo any received characters
