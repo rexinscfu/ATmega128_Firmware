@@ -15,6 +15,8 @@ mod os;
 
 use drivers::{LedMatrix, SerialConsole, ButtonHandler, ButtonEvent, Button};
 use hal::{Power, SleepMode, Watchdog, WatchdogTimeout, Adc, AdcChannel};
+use application::Application;
+use os::Scheduler;
 
 // Global state for interrupt handling
 static GLOBAL_PERIPHERALS: Mutex<RefCell<Option<Peripherals>>> = 
@@ -35,6 +37,7 @@ fn main() -> ! {
     let mut power = Power::new();
     let mut watchdog = Watchdog::new();
     let mut adc = Adc::new();
+    let mut scheduler = Scheduler::new();
 
     // Enable watchdog with 1s timeout
     watchdog.start(WatchdogTimeout::Ms1000);
@@ -46,88 +49,19 @@ fn main() -> ! {
     console.write_line("ATmega128 Firmware v0.1.0");
     console.write_line("Ready...");
 
-    let mut led_pattern = 0u8;
-    let mut idle_counter = 0u16;
-    let mut adc_counter = 0u16;
-
-    #[allow(clippy::empty_loop)]
+    // Main application loop
+    let mut app = Application::new();
+    
     loop {
-        // Feed watchdog to prevent reset
+        let ticks = scheduler.get_ticks();
+        
+        // Update application state
+        app.update(&mut leds, &mut console, &mut buttons, &mut adc, ticks);
+        
+        // Pet watchdog
         watchdog.feed();
-
-        // Handle button events
-        if let Some(event) = buttons.poll() {
-            match event {
-                ButtonEvent::Pressed(btn) => {
-                    match btn {
-                        Button::Button0 => {
-                            led_pattern = led_pattern.wrapping_add(1);
-                            leds.set_pattern(led_pattern);
-                            console.debug("Pattern", led_pattern);
-                            idle_counter = 0;
-                        },
-                        Button::Button1 => {
-                            led_pattern = led_pattern.wrapping_sub(1);
-                            leds.set_pattern(led_pattern);
-                            console.debug("Pattern", led_pattern);
-                            idle_counter = 0;
-                        },
-                        Button::Button2 => {
-                            leds.toggle_all();
-                            console.write_line("Toggle all LEDs");
-                            idle_counter = 0;
-                        },
-                        Button::Button3 => {
-                            leds.knight_rider(100);
-                            console.write_line("Knight Rider mode");
-                            idle_counter = 0;
-                        }
-                    }
-                },
-                ButtonEvent::Released(_) => {
-                    // Ignore release events for now
-                }
-            }
-        }
-
-        // Read ADC every ~500ms
-        adc_counter = adc_counter.saturating_add(1);
-        if adc_counter >= 500 {
-            let voltage = adc.read_voltage(AdcChannel::Adc0);
-            console.write_str("ADC0: ");
-            // Convert float to integer for simple display
-            let mv = (voltage * 1000.0) as u16;
-            console.write_str(mv.to_string().as_str());
-            console.write_line("mV");
-            adc_counter = 0;
-        }
-
-        // Echo any received characters
-        if let Some(byte) = console.read_byte() {
-            console.write_byte(byte);
-            idle_counter = 0;
-        } else {
-            idle_counter = idle_counter.saturating_add(1);
-        }
-
-        // Power management
-        if idle_counter > 1000 {
-            // No activity for a while, enter power down
-            console.write_line("Entering power down mode...");
-            leds.set_all(false);
-            
-            // Disable watchdog before deep sleep
-            watchdog.disable();
-            power.enter_power_down();
-            
-            // Re-enable watchdog after wakeup
-            watchdog.start(WatchdogTimeout::Ms1000);
-            
-            idle_counter = 0;
-            console.write_line("Waking up from power down");
-        } else {
-            // Just use idle mode for normal operation
-            power.enter_idle_mode();
-        }
+        
+        // Enter sleep mode until next tick
+        scheduler.sleep(&mut power);
     }
 } 
