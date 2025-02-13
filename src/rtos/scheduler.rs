@@ -29,6 +29,16 @@ struct TaskContext {
     registers: [u8; 32],
 }
 
+#[derive(Debug)]
+pub enum SchedulerError {
+    TaskLimitReached,
+    TaskNotFound,
+    InvalidPriority,
+    AlreadyRunning,
+}
+
+pub type Result<T> = core::result::Result<T, SchedulerError>;
+
 pub struct Scheduler {
     tasks: [Option<Task>; MAX_TASKS],
     current_task: Option<usize>,
@@ -66,7 +76,11 @@ impl Scheduler {
         }
     }
 
-    pub fn init(&mut self) {
+    pub fn init(&mut self) -> Result<()> {
+        if SCHEDULER_RUNNING.load(Ordering::SeqCst) {
+            return Err(SchedulerError::AlreadyRunning);
+        }
+
         // Configure Timer0 for 1ms ticks
         self.timer.tccr0.write(|w| unsafe { 
             w.cs0().bits(0b011) // Prescaler 64
@@ -76,14 +90,16 @@ impl Scheduler {
         self.timer.timsk.modify(|_, w| w.ocie0().set_bit());
 
         // Create and add idle task
-        self.idle_task_index = self.add_task(Scheduler::idle_task, TaskPriority::Idle, 0);
+        self.idle_task_index = self.add_task(Self::idle_task, TaskPriority::Idle, 0)
+            .ok_or(SchedulerError::TaskLimitReached)?;
         
         SCHEDULER_RUNNING.store(true, Ordering::SeqCst);
+        Ok(())
     }
 
-    pub fn add_task(&mut self, function: fn() -> !, priority: TaskPriority, period_ms: u32) -> Option<usize> {
+    pub fn add_task(&mut self, function: fn() -> !, priority: TaskPriority, period_ms: u32) -> Result<usize> {
         if self.task_count >= MAX_TASKS {
-            return None;
+            return Err(SchedulerError::TaskLimitReached);
         }
 
         let task = Task::new(priority.into(), "task", function);
@@ -93,10 +109,20 @@ impl Scheduler {
             if slot.is_none() {
                 *slot = Some(task);
                 self.task_count += 1;
-                return Some(i);
+                return Ok(i);
             }
         }
-        None
+        Err(SchedulerError::TaskLimitReached)
+    }
+
+    pub fn remove_task(&mut self, task_id: usize) -> Result<()> {
+        if task_id >= MAX_TASKS || self.tasks[task_id].is_none() {
+            return Err(SchedulerError::TaskNotFound);
+        }
+
+        self.tasks[task_id] = None;
+        self.task_count -= 1;
+        Ok(())
     }
 
     pub fn run(&mut self) -> ! {
@@ -238,7 +264,7 @@ impl TaskBuilder {
 
     pub fn build(self, scheduler: &mut Scheduler) -> bool {
         if let Some(function) = self.function {
-            scheduler.add_task(function, self.priority, self.period_ms).is_some()
+            scheduler.add_task(function, self.priority, self.period_ms).is_ok()
         } else {
             false
         }
