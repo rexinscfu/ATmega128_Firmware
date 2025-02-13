@@ -16,6 +16,11 @@ pub enum TaskState {
 }
 
 #[derive(Copy, Clone)]
+pub enum EventType {
+    // Add event types as needed
+}
+
+#[derive(Copy, Clone)]
 pub struct TaskControl {
     pub id: u8,
     pub stack_ptr: StackPtr,
@@ -24,6 +29,9 @@ pub struct TaskControl {
     pub state: TaskState,
     pub priority: u8,
     pub name: &'static str,
+    pub waiting_event: Option<EventType>,
+    pub last_wake_time: u32,
+    pub deadline_ms: u32,
 }
 
 pub struct Task {
@@ -46,11 +54,13 @@ impl Task {
                 state: TaskState::Ready,
                 priority,
                 name,
+                waiting_event: None,
+                last_wake_time: 0,
+                deadline_ms: 0,
             },
             stack: [0; 512],
         };
 
-        // Initialize stack
         let stack_top = task.init_stack(entry);
         task.control.stack_ptr = stack_top;
         task.control.stack_base = task.stack.as_mut_ptr();
@@ -125,5 +135,18 @@ impl Task {
         if self.control.state == TaskState::Blocked {
             self.control.state = TaskState::Ready;
         }
+    }
+
+    pub fn wait_for_event(&mut self, event_type: EventType) {
+        self.control.waiting_event = Some(event_type);
+        self.control.state = TaskState::Blocked;
+    }
+
+    pub fn set_deadline(&mut self, deadline_ms: u32) {
+        self.control.deadline_ms = deadline_ms;
+    }
+
+    pub fn is_deadline_missed(&self, current_time: u32) -> bool {
+        self.control.deadline_ms > 0 && current_time > self.control.last_wake_time + self.control.deadline_ms
     }
 }
