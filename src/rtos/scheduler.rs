@@ -35,9 +35,105 @@ pub enum SchedulerError {
     TaskNotFound,
     InvalidPriority,
     AlreadyRunning,
+    EventQueueFull,
+    Timeout,
+    NoSemaphoresAvailable,
+    InvalidSemaphore,
+    SemaphoreLocked,
 }
 
 pub type Result<T> = core::result::Result<T, SchedulerError>;
+
+#[derive(Copy, Clone, PartialEq)]
+pub enum EventType {
+    Timer,
+    Gpio,
+    Uart,
+    Adc,
+    Custom(u8),
+}
+
+#[derive(Copy, Clone)]
+pub struct Event {
+    event_type: EventType,
+    data: u32,
+    timestamp: u32,
+}
+
+pub struct EventQueue {
+    events: [Option<Event>; 32],
+    head: usize,
+    tail: usize,
+}
+
+impl EventQueue {
+    pub const fn new() -> Self {
+        Self {
+            events: [None; 32],
+            head: 0,
+            tail: 0,
+        }
+    }
+
+    pub fn push(&mut self, event: Event) -> bool {
+        let next = (self.tail + 1) % self.events.len();
+        if next != self.head {
+            self.events[self.tail] = Some(event);
+            self.tail = next;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn pop(&mut self) -> Option<Event> {
+        if self.head != self.tail {
+            let event = self.events[self.head].take();
+            self.head = (self.head + 1) % self.events.len();
+            event
+        } else {
+            None
+        }
+    }
+}
+
+pub struct Semaphore {
+    count: AtomicU8,
+    waiting_tasks: [Option<usize>; MAX_TASKS],
+    num_waiting: usize,
+}
+
+impl Semaphore {
+    pub const fn new(initial: u8) -> Self {
+        Self {
+            count: AtomicU8::new(initial),
+            waiting_tasks: [None; MAX_TASKS],
+            num_waiting: 0,
+        }
+    }
+
+    pub fn acquire(&mut self) -> bool {
+        loop {
+            let current = self.count.load(Ordering::Relaxed);
+            if current > 0 {
+                if self.count.compare_exchange(
+                    current,
+                    current - 1,
+                    Ordering::Acquire,
+                    Ordering::Relaxed,
+                ).is_ok() {
+                    return true;
+                }
+            } else {
+                return false;
+            }
+        }
+    }
+
+    pub fn release(&mut self) {
+        self.count.fetch_add(1, Ordering::Release);
+    }
+}
 
 pub struct Scheduler {
     tasks: [Option<Task>; MAX_TASKS],
@@ -48,6 +144,8 @@ pub struct Scheduler {
     statistics: [TaskStatistics; MAX_TASKS],
     contexts: [TaskContext; MAX_TASKS],
     idle_task_index: Option<usize>,
+    event_queue: EventQueue,
+    semaphores: [Semaphore; 8],
 }
 
 impl Scheduler {
@@ -73,6 +171,8 @@ impl Scheduler {
                 registers: [0; 32],
             }; MAX_TASKS],
             idle_task_index: None,
+            event_queue: EventQueue::new(),
+            semaphores: [Semaphore::new(0); 8],
         }
     }
 
@@ -220,6 +320,90 @@ impl Scheduler {
         loop {
             unsafe { avr_device::asm::sleep() };
         }
+    }
+
+    pub fn post_event(&mut self, event_type: EventType, data: u32) -> Result<()> {
+        let event = Event {
+            event_type,
+            data,
+            timestamp: SYSTEM_TICKS.load(Ordering::Relaxed),
+        };
+
+        if !self.event_queue.push(event) {
+            return Err(SchedulerError::EventQueueFull);
+        }
+
+        // Wake up tasks waiting for events
+        self.wake_event_tasks(event_type);
+        Ok(())
+    }
+
+    pub fn wait_for_event(&mut self, event_type: EventType, timeout_ms: u32) -> Result<Event> {
+        let deadline = SYSTEM_TICKS.load(Ordering::Relaxed) + timeout_ms;
+        
+        loop {
+            if let Some(event) = self.event_queue.pop() {
+                if event.event_type == event_type {
+                    return Ok(event);
+                }
+            }
+
+            if SYSTEM_TICKS.load(Ordering::Relaxed) >= deadline {
+                return Err(SchedulerError::Timeout);
+            }
+
+            // Put current task to sleep
+            if let Some(current) = self.current_task {
+                self.tasks[current].as_mut().unwrap().control.state = TaskState::Blocked;
+            }
+
+            // Switch to next task
+            if let Some(next) = self.schedule_next_task() {
+                self.switch_task(next);
+            }
+        }
+    }
+
+    fn wake_event_tasks(&mut self, event_type: EventType) {
+        for task in self.tasks.iter_mut().flatten() {
+            if task.control.state == TaskState::Blocked {
+                task.control.state = TaskState::Ready;
+            }
+        }
+    }
+
+    pub fn create_semaphore(&mut self, initial: u8) -> Result<usize> {
+        for (i, sem) in self.semaphores.iter_mut().enumerate() {
+            if sem.count.load(Ordering::Relaxed) == 0 {
+                *sem = Semaphore::new(initial);
+                return Ok(i);
+            }
+        }
+        Err(SchedulerError::NoSemaphoresAvailable)
+    }
+
+    pub fn semaphore_acquire(&mut self, sem_id: usize) -> Result<()> {
+        if sem_id >= self.semaphores.len() {
+            return Err(SchedulerError::InvalidSemaphore);
+        }
+
+        if !self.semaphores[sem_id].acquire() {
+            if let Some(current) = self.current_task {
+                self.tasks[current].as_mut().unwrap().control.state = TaskState::Blocked;
+            }
+            return Err(SchedulerError::SemaphoreLocked);
+        }
+
+        Ok(())
+    }
+
+    pub fn semaphore_release(&mut self, sem_id: usize) -> Result<()> {
+        if sem_id >= self.semaphores.len() {
+            return Err(SchedulerError::InvalidSemaphore);
+        }
+
+        self.semaphores[sem_id].release();
+        Ok(())
     }
 }
 
