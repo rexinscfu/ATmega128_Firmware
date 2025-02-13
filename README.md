@@ -47,7 +47,7 @@ avrdude -p m128 -c arduino -P /dev/ttyUSB0 -b 115200 -U flash:w:target/avr-atmeg
   /drivers         → Board-specific drivers
   /hal             → Hardware abstraction layer
   /application     → Application logic
-  /os              → Task scheduler (WIP)
+  /rtos            → Real-time task scheduler
   /config          → Build configuration
 /tests             → Hardware-in-loop tests
 /hw               → Hardware documentation
